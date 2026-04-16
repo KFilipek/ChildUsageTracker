@@ -1,0 +1,6 @@
+// Embed the application manifest so Windows loads comctl32 v6
+// (required for TaskDialogIndirect — ordinal 345)
+#define RT_MANIFEST  24
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"

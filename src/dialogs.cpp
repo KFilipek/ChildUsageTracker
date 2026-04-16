@@ -2,6 +2,12 @@
 #include <windows.h>
 #include <commctrl.h>
 
+// Request comctl32 v6 via manifest dependency embedded in the .obj.
+// Without this Windows loads comctl32 v5 which lacks TaskDialogIndirect (ordinal 345).
+#pragma comment(linker, "/manifestdependency:\"type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
 // Idempotent — safe to call multiple times.
 static void EnsureCommonControls() {
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES };
