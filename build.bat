@@ -54,9 +54,9 @@ echo  Output: build\ChildUsageTracker.exe
 echo ============================================================
 echo.
 echo NEXT STEPS:
-echo   1. Edit config.ini — set your GitHub PAT (token=...)
+echo   1. Edit config.ini - set your GitHub PAT (token=...)
 echo   2. Copy config.ini next to ChildUsageTracker.exe
-echo   3. Run ChildUsageTracker.exe  — starts silently in background
-echo   4. Run ChildUsageTracker.exe /install  — auto-starts on Windows login
-echo   5. Run ChildUsageTracker.exe /uninstall — removes auto-start
+echo   3. Run ChildUsageTracker.exe  - starts silently in background
+echo   4. Run ChildUsageTracker.exe /install  - auto-starts on Windows login
+echo   5. Run ChildUsageTracker.exe /uninstall - removes auto-start
 echo.
