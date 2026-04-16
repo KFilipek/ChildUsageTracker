@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -140,35 +141,50 @@ static void WorkerThread(std::wstring exeDir) {
     Config config;
 
     if (!config.load(configPath)) {
-        // First run: write a default config.ini so the user can fill in the PAT.
-        config.set("github",   "token",                  "YOUR_GITHUB_PAT_HERE");
-        config.set("github",   "gist_id",                "");
-        config.set("settings", "poll_interval_seconds",  "10");
-        config.set("settings", "sync_interval_minutes",  "5");
-        config.set("games",    "cs2.exe",                "Counter-Strike 2");
+        // No config found — seed defaults and fall through to setup dialog.
+        config.set("github",   "token",                 "");
+        config.set("github",   "gist_id",               "");
+        config.set("settings", "sync_mode",             "");
+        config.set("settings", "poll_interval_seconds", "10");
+        config.set("settings", "sync_interval_minutes", "5");
+        config.set("games",    "cs2.exe",               "Counter-Strike 2");
         config.set("games",    "ScooterFlow.exe",        "ScooterFlow");
         config.save();
-        ShowTrayNotification(
-            L"ChildUsageTracker \u2014 Setup Required",
-            L"config.ini was created next to the .exe.\n"
-            L"1. Set your GitHub PAT (token=)\n"
-            L"2. Re-run ChildUsageTracker.exe",
-            true);
-        Sleep(13000); // wait for notification thread to finish
-        return;
     }
 
-    const std::string token = config.get("github", "token", "");
+    std::string token    = config.get("github",   "token",     "");
+    std::string syncMode = config.get("settings", "sync_mode", "");
+
+    // First-run setup: token not configured yet.
     if (token.empty() || token == "YOUR_GITHUB_PAT_HERE") {
-        ShowTrayNotification(
-            L"ChildUsageTracker \u2014 Not Configured",
-            L"GitHub token is not set in config.ini.\n"
-            L"Create a PAT at github.com/settings/tokens\n"
-            L"(scope: gist), then set token= and re-run.",
-            true);
-        Sleep(13000);
-        return;
+        std::wstring pat;
+        const auto choice = ShowSetupDialog(pat);
+        if (choice == SetupChoice::Cancel) return;
+
+        if (choice == SetupChoice::GitHub) {
+            // Convert wide PAT to UTF-8 (PAT is always ASCII, but use proper API).
+            const int len = WideCharToMultiByte(CP_UTF8, 0, pat.c_str(), -1,
+                                                nullptr, 0, nullptr, nullptr);
+            std::string narrow(len > 0 ? len - 1 : 0, '\0');
+            if (len > 0)
+                WideCharToMultiByte(CP_UTF8, 0, pat.c_str(), -1,
+                                    narrow.data(), len, nullptr, nullptr);
+            token    = std::move(narrow);
+            syncMode = "gist";
+            config.set("github", "token", token);
+        } else {
+            syncMode = "local";
+        }
+        config.set("settings", "sync_mode", syncMode);
+        config.save();
+    } else if (syncMode.empty()) {
+        // Legacy config without sync_mode — assume gist (backward compat).
+        syncMode = "gist";
+        config.set("settings", "sync_mode", "gist");
+        config.save();
     }
+
+    const bool isLocalMode = (syncMode == "local");
 
     int pollSeconds = 10;
     int syncMinutes = 5;
@@ -183,12 +199,29 @@ static void WorkerThread(std::wstring exeDir) {
     Tracker tracker;
     tracker.setGames(games_section);
 
-    // ── Gist setup ────────────────────────────────────────────────────────────
+    // ── Gist / local storage setup ────────────────────────────────────────────
     GistClient gist(token);
     std::string gist_id = config.get("github", "gist_id", "");
 
-    if (gist_id.empty()) {
-        // First run: create the Gist and persist its ID.
+    if (isLocalMode) {
+        // Load history from local sessions.json.
+        const std::wstring sessPath = exeDir + L"\\sessions.json";
+        std::ifstream sf(sessPath);
+        if (sf.is_open()) {
+            try {
+                std::ostringstream oss;
+                oss << sf.rdbuf();
+                tracker.loadFromJson(nlohmann::json::parse(oss.str()));
+            } catch (...) {}
+        }
+        const std::wstring msg =
+            L"Tracking " + std::to_wstring(gameCount) + L" game(s).\n"
+            + std::to_wstring(tracker.completedSessionCount())
+            + L" sessions loaded. Data saved locally only (sessions.json).";
+        ShowTrayNotification(L"ChildUsageTracker \u2014 Running (local)", msg.c_str());
+
+    } else if (gist_id.empty()) {
+        // First Gist run: create it and persist the ID.
         nlohmann::json empty;
         empty["version"]         = "1.0";
         empty["sessions"]        = nlohmann::json::array();
@@ -213,7 +246,7 @@ static void WorkerThread(std::wstring exeDir) {
                 true);
         }
     } else {
-        // Subsequent runs: restore history from Gist.
+        // Subsequent Gist run: restore history.
         const std::string content = gist.fetch(gist_id, GIST_FILE);
         if (!content.empty()) {
             try {
@@ -239,9 +272,10 @@ static void WorkerThread(std::wstring exeDir) {
         const auto minsElapsed =
             std::chrono::duration_cast<std::chrono::minutes>(now - lastSync).count();
 
-        if (minsElapsed >= syncMinutes && !gist_id.empty()) {
+        if (minsElapsed >= syncMinutes) {
             const std::string json_str = tracker.toJson().dump(2);
-            gist.update(gist_id, GIST_FILE, json_str);
+            if (!isLocalMode && !gist_id.empty())
+                gist.update(gist_id, GIST_FILE, json_str);
             WriteLocalBackup(exeDir, json_str);
             tracker.clearDirty();
             lastSync = now;
@@ -253,9 +287,10 @@ static void WorkerThread(std::wstring exeDir) {
     }
 
     // ── final sync on clean shutdown ──────────────────────────────────────────
-    if (!gist_id.empty()) {
+    {
         const std::string json_str = tracker.toJson().dump(2);
-        gist.update(gist_id, GIST_FILE, json_str);
+        if (!isLocalMode && !gist_id.empty())
+            gist.update(gist_id, GIST_FILE, json_str);
         WriteLocalBackup(exeDir, json_str);
     }
 }

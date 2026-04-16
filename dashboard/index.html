@@ -273,8 +273,12 @@
   <div class="controls">
     <input type="text" id="gist-url-input"
            placeholder="Gist ID or URL  e.g. https://gist.github.com/user/abc123">
-    <button onclick="loadGist()">Load</button>
+    <button onclick="loadGist()">Load Gist</button>
+    <button class="secondary" onclick="triggerFilePicker()">Load local file</button>
     <button class="secondary" onclick="loadDemo()">Demo data</button>
+    <!-- hidden file picker — accepts sessions.json from the tracker -->
+    <input type="file" id="local-file-input" accept=".json"
+           style="display:none" onchange="loadLocalFile(event)">
   </div>
 </div>
 
@@ -435,6 +439,30 @@ function hideUI() {
   ['timeframe-bar','stat-grid','charts-row1','charts-row2','streaks-section','sessions-panel']
     .forEach(id => document.getElementById(id).style.display = 'none');
   document.getElementById('active-bar').classList.remove('visible');
+}
+
+// ── load from local sessions.json ────────────────────────────────────────────
+function triggerFilePicker() {
+  document.getElementById('local-file-input').value = '';
+  document.getElementById('local-file-input').click();
+}
+
+function loadLocalFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  hideUI();
+  showStatus('Reading ' + escHtml(file.name) + '…', false, true);
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      gData = JSON.parse(e.target.result);
+      render();
+    } catch (err) {
+      showStatus('Could not parse JSON: ' + err.message, true);
+    }
+  };
+  reader.onerror = () => showStatus('Could not read file.', true);
+  reader.readAsText(file);
 }
 
 // ── load from GitHub Gist API ─────────────────────────────────────────────────
