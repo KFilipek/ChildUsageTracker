@@ -1,0 +1,312 @@
+// ChildUsageTracker — silent background process
+// Monitors game session times and syncs a rolling JSON log to a GitHub Gist.
+//
+// Usage:
+//   ChildUsageTracker.exe             — start tracking (no window, no console)
+//   ChildUsageTracker.exe /install    — register as auto-start on Windows login
+//   ChildUsageTracker.exe /uninstall  — remove auto-start entry
+
+#include <windows.h>
+#include <shellapi.h>
+#include <fstream>
+#include <string>
+#include <thread>
+
+#include <nlohmann/json.hpp>
+
+#include "config.h"
+#include "gist_client.h"
+#include "process_monitor.h"
+#include "tracker.h"
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
+static constexpr wchar_t MUTEX_NAME[]  = L"ChildUsageTrackerMutex_v1";
+static constexpr wchar_t REG_KEY[]     = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static constexpr wchar_t REG_VALUE[]   = L"ChildUsageTracker";
+static constexpr char    GIST_FILE[]   = "child_usage_log.json";
+static constexpr char    GIST_DESC[]   = "Child PC Usage Tracker Log";
+
+// ── globals ───────────────────────────────────────────────────────────────────
+
+static volatile bool g_running = true;
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+static std::wstring GetExePath() {
+    wchar_t buf[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    return buf;
+}
+
+static std::wstring GetExeDir() {
+    std::wstring path = GetExePath();
+    const auto pos = path.find_last_of(L"\\/");
+    return (pos != std::wstring::npos) ? path.substr(0, pos) : L".";
+}
+
+static void WriteLocalBackup(const std::wstring& dir, const std::string& json_str) {
+    const std::wstring path = dir + L"\\sessions.json";
+    std::ofstream f(path);
+    if (f.is_open()) f << json_str;
+}
+
+// ── registry helpers ──────────────────────────────────────────────────────────
+
+static void RegisterAutoStart() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return;
+    const std::wstring exePath = GetExePath();
+    RegSetValueExW(hKey, REG_VALUE, 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(exePath.c_str()),
+                   static_cast<DWORD>((exePath.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(hKey);
+}
+
+static void UnregisterAutoStart() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return;
+    RegDeleteValueW(hKey, REG_VALUE);
+    RegCloseKey(hKey);
+}
+
+// ── shutdown handler (handles system shutdown / logoff) ───────────────────────
+
+static BOOL WINAPI CtrlHandler(DWORD dwCtrlType) {
+    if (dwCtrlType == CTRL_SHUTDOWN_EVENT ||
+        dwCtrlType == CTRL_LOGOFF_EVENT   ||
+        dwCtrlType == CTRL_CLOSE_EVENT) {
+        g_running = false;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// ── system-tray balloon notification (fire-and-forget) ───────────────────────
+
+static void ShowTrayNotification(const wchar_t* title,
+                                  const wchar_t* message,
+                                  bool isError = false) {
+    std::thread([t = std::wstring(title), m = std::wstring(message), isError]() {
+        // Register a minimal window class (failure = already registered, fine).
+        WNDCLASSEXW wc   = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = DefWindowProcW;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"CUT_NotifyWnd";
+        RegisterClassExW(&wc);
+
+        // Message-only window — no taskbar entry, fully invisible.
+        HWND hwnd = CreateWindowExW(0, L"CUT_NotifyWnd", L"", 0,
+                                    0, 0, 0, 0,
+                                    HWND_MESSAGE, nullptr,
+                                    GetModuleHandleW(nullptr), nullptr);
+        if (!hwnd) return;
+
+        NOTIFYICONDATAW nid  = {};
+        nid.cbSize           = sizeof(nid);
+        nid.hWnd             = hwnd;
+        nid.uID              = 1;
+        nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+        nid.uCallbackMessage = WM_USER + 1;
+        nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
+        wcscpy_s(nid.szTip, L"ChildUsageTracker");
+        Shell_NotifyIconW(NIM_ADD, &nid);
+
+        // Populate balloon (truncate to field size limits).
+        nid.uFlags      = NIF_INFO;
+        nid.dwInfoFlags = isError ? NIIF_ERROR : NIIF_INFO;
+        const std::wstring ti = t.substr(0, 63);
+        const std::wstring mi = m.substr(0, 255);
+        wcscpy_s(nid.szInfoTitle, ti.c_str());
+        wcscpy_s(nid.szInfo,      mi.c_str());
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+
+        Sleep(12000); // keep icon alive long enough for balloon to display
+
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        DestroyWindow(hwnd);
+    }).detach();
+}
+
+// ── worker thread ─────────────────────────────────────────────────────────────
+
+static void WorkerThread(std::wstring exeDir) {
+    // ── load config ───────────────────────────────────────────────────────────
+    const std::wstring configPath = exeDir + L"\\config.ini";
+    Config config;
+
+    if (!config.load(configPath)) {
+        // First run: write a default config.ini so the user can fill in the PAT.
+        config.set("github",   "token",                  "YOUR_GITHUB_PAT_HERE");
+        config.set("github",   "gist_id",                "");
+        config.set("settings", "poll_interval_seconds",  "10");
+        config.set("settings", "sync_interval_minutes",  "5");
+        config.set("games",    "cs2.exe",                "Counter-Strike 2");
+        config.set("games",    "ScooterFlow.exe",        "ScooterFlow");
+        config.save();
+        ShowTrayNotification(
+            L"ChildUsageTracker \u2014 Setup Required",
+            L"config.ini was created next to the .exe.\n"
+            L"1. Set your GitHub PAT (token=)\n"
+            L"2. Re-run ChildUsageTracker.exe",
+            true);
+        Sleep(13000); // wait for notification thread to finish
+        return;
+    }
+
+    const std::string token = config.get("github", "token", "");
+    if (token.empty() || token == "YOUR_GITHUB_PAT_HERE") {
+        ShowTrayNotification(
+            L"ChildUsageTracker \u2014 Not Configured",
+            L"GitHub token is not set in config.ini.\n"
+            L"Create a PAT at github.com/settings/tokens\n"
+            L"(scope: gist), then set token= and re-run.",
+            true);
+        Sleep(13000);
+        return;
+    }
+
+    int pollSeconds = 10;
+    int syncMinutes = 5;
+    try {
+        pollSeconds = std::stoi(config.get("settings", "poll_interval_seconds", "10"));
+        syncMinutes = std::stoi(config.get("settings", "sync_interval_minutes", "5"));
+    } catch (...) {}
+
+    // ── build tracked-game map ────────────────────────────────────────────────
+    const auto games_section = config.getSection("games");
+    const int  gameCount     = static_cast<int>(games_section.size());
+    Tracker tracker;
+    tracker.setGames(games_section);
+
+    // ── Gist setup ────────────────────────────────────────────────────────────
+    GistClient gist(token);
+    std::string gist_id = config.get("github", "gist_id", "");
+
+    if (gist_id.empty()) {
+        // First run: create the Gist and persist its ID.
+        nlohmann::json empty;
+        empty["version"]         = "1.0";
+        empty["sessions"]        = nlohmann::json::array();
+        empty["active_sessions"] = nlohmann::json::object();
+        empty["daily_totals"]    = nlohmann::json::object();
+
+        gist_id = gist.create(GIST_DESC, GIST_FILE, empty.dump(2));
+        if (!gist_id.empty()) {
+            config.set("github", "gist_id", gist_id);
+            config.save();
+            const std::wstring url = L"https://gist.github.com/"
+                                   + std::wstring(gist_id.begin(), gist_id.end());
+            const std::wstring msg = L"Tracking " + std::to_wstring(gameCount) + L" game(s).\n"
+                                   + L"Private Gist created:\n" + url;
+            ShowTrayNotification(L"ChildUsageTracker \u2014 Started", msg.c_str());
+        } else {
+            ShowTrayNotification(
+                L"ChildUsageTracker \u2014 Gist Error",
+                L"Could not create GitHub Gist.\n"
+                L"Check your token and internet connection.\n"
+                L"Tracking locally only (sessions.json).",
+                true);
+        }
+    } else {
+        // Subsequent runs: restore history from Gist.
+        const std::string content = gist.fetch(gist_id, GIST_FILE);
+        if (!content.empty()) {
+            try {
+                tracker.loadFromJson(nlohmann::json::parse(content));
+            } catch (...) {}
+        }
+        const std::wstring msg =
+            L"Tracking " + std::to_wstring(gameCount) + L" game(s).\n"
+            + std::to_wstring(tracker.completedSessionCount())
+            + L" previous sessions loaded from Gist.";
+        ShowTrayNotification(L"ChildUsageTracker \u2014 Running", msg.c_str());
+    }
+
+    // Force a sync shortly after startup to confirm connectivity.
+    auto lastSync = std::chrono::steady_clock::now()
+                  - std::chrono::minutes(syncMinutes);
+
+    // ── main poll loop ────────────────────────────────────────────────────────
+    while (g_running) {
+        tracker.update(GetRunningProcessNames());
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto minsElapsed =
+            std::chrono::duration_cast<std::chrono::minutes>(now - lastSync).count();
+
+        if (minsElapsed >= syncMinutes && !gist_id.empty()) {
+            const std::string json_str = tracker.toJson().dump(2);
+            gist.update(gist_id, GIST_FILE, json_str);
+            WriteLocalBackup(exeDir, json_str);
+            tracker.clearDirty();
+            lastSync = now;
+        }
+
+        // Sleep in 1-second increments so we react to g_running = false quickly.
+        for (int i = 0; i < pollSeconds && g_running; ++i)
+            Sleep(1000);
+    }
+
+    // ── final sync on clean shutdown ──────────────────────────────────────────
+    if (!gist_id.empty()) {
+        const std::string json_str = tracker.toJson().dump(2);
+        gist.update(gist_id, GIST_FILE, json_str);
+        WriteLocalBackup(exeDir, json_str);
+    }
+}
+
+// ── entry point ───────────────────────────────────────────────────────────────
+
+int WINAPI WinMain(HINSTANCE /*hInstance*/,
+                   HINSTANCE /*hPrevInstance*/,
+                   LPSTR     /*lpCmdLine*/,
+                   int       /*nCmdShow*/) {
+    // ── single-instance guard ─────────────────────────────────────────────────
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, MUTEX_NAME);
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (hMutex) CloseHandle(hMutex);
+        return 0;
+    }
+
+    // ── parse command-line flags (use wide version for correctness) ───────────
+    const std::wstring cmdLine = GetCommandLineW();
+
+    if (cmdLine.find(L"/install") != std::wstring::npos) {
+        RegisterAutoStart();
+        MessageBoxW(nullptr,
+                    L"ChildUsageTracker has been registered.\n"
+                    L"It will start automatically on Windows login.",
+                    L"ChildUsageTracker \u2014 Installed",
+                    MB_OK | MB_ICONINFORMATION);
+        CloseHandle(hMutex);
+        return 0;
+    }
+
+    if (cmdLine.find(L"/uninstall") != std::wstring::npos) {
+        UnregisterAutoStart();
+        MessageBoxW(nullptr,
+                    L"ChildUsageTracker has been removed from auto-start.",
+                    L"ChildUsageTracker \u2014 Uninstalled",
+                    MB_OK | MB_ICONINFORMATION);
+        CloseHandle(hMutex);
+        return 0;
+    }
+
+    // ── install shutdown / logoff handler ─────────────────────────────────────
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
+    // ── run worker and wait ───────────────────────────────────────────────────
+    // No window or message pump is created — the process stays alive only
+    // because the worker thread is running. It is invisible in the taskbar
+    // and has no console window (/SUBSYSTEM:WINDOWS via WIN32_EXECUTABLE).
+    const std::wstring exeDir = GetExeDir();
+    std::thread worker(WorkerThread, exeDir);
+    worker.join();
+
+    CloseHandle(hMutex);
+    return 0;
+}

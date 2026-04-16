@@ -1,0 +1,27 @@
+# ── Build output ──────────────────────────────────────────────────────────────
+build/
+
+# ── Sensitive files — NEVER commit these ─────────────────────────────────────
+gist_token.txt
+*.token
+*.secret
+*.key
+
+# ── Runtime-generated files ───────────────────────────────────────────────────
+sessions.json
+
+# ── Compiler intermediates ───────────────────────────────────────────────────
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.lib
+
+# ── Local config (may contain real PAT) ──────────────────────────────────────
+# The config.ini in the repo root is the template with a placeholder token.
+# The one placed next to the .exe (in build/) is already excluded above.
+
+# ── Editor / OS noise ────────────────────────────────────────────────────────
+.vscode/
+Thumbs.db
+Desktop.ini
