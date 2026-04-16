@@ -3,6 +3,7 @@
 //
 // Usage:
 //   ChildUsageTracker.exe             — start tracking (no window, no console)
+//   ChildUsageTracker.exe /?          — show this help
 //   ChildUsageTracker.exe /install    — register as auto-start on Windows login
 //   ChildUsageTracker.exe /uninstall  — remove auto-start entry
 
@@ -310,6 +311,35 @@ int WINAPI WinMain(HINSTANCE /*hInstance*/,
 
     // ── parse command-line flags (use wide version for correctness) ───────────
     const std::wstring cmdLine = GetCommandLineW();
+
+    // /? or --help or -h
+    if (cmdLine.find(L"/?")     != std::wstring::npos ||
+        cmdLine.find(L"--help") != std::wstring::npos ||
+        cmdLine.find(L"-h")     != std::wstring::npos) {
+        MessageBoxW(nullptr,
+                    L"ChildUsageTracker — silent game-time tracker\n"
+                    L"\n"
+                    L"Usage:\n"
+                    L"  ChildUsageTracker.exe             Start tracking (background, no window)\n"
+                    L"  ChildUsageTracker.exe /?          Show this help\n"
+                    L"  ChildUsageTracker.exe /install    Register auto-start on Windows login\n"
+                    L"  ChildUsageTracker.exe /uninstall  Remove auto-start entry\n"
+                    L"\n"
+                    L"Configuration:\n"
+                    L"  config.ini  — place in the same folder as the .exe\n"
+                    L"  [games]     — add exe=Display Name lines to track games\n"
+                    L"  [settings]  — poll_interval_seconds, sync_interval_minutes\n"
+                    L"  [github]    — token (PAT with gist scope), gist_id\n"
+                    L"\n"
+                    L"Data is stored in sessions.json (local mode) or a private\n"
+                    L"GitHub Gist (configured on first run).\n"
+                    L"\n"
+                    L"Dashboard: open dashboard/index.html in any browser.",
+                    L"ChildUsageTracker — Help",
+                    MB_OK | MB_ICONINFORMATION);
+        CloseHandle(hMutex);
+        return 0;
+    }
 
     if (cmdLine.find(L"/install") != std::wstring::npos) {
         RegisterAutoStart();
