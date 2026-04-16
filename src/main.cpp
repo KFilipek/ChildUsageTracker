@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "dialogs.h"
 #include "gist_client.h"
 #include "process_monitor.h"
 #include "tracker.h"
@@ -298,6 +299,28 @@ int WINAPI WinMain(HINSTANCE /*hInstance*/,
 
     // ── install shutdown / logoff handler ─────────────────────────────────────
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
+    // ── show install prompt if not registered in auto-start ───────────────────
+    {
+        HKEY hKey = nullptr;
+        bool isRegistered = false;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+            wchar_t val[MAX_PATH] = {};
+            DWORD sz = sizeof(val);
+            isRegistered = (RegQueryValueExW(hKey, REG_VALUE, nullptr, nullptr,
+                                             reinterpret_cast<BYTE*>(val), &sz) == ERROR_SUCCESS);
+            RegCloseKey(hKey);
+        }
+        if (!isRegistered) {
+            const auto choice = ShowInstallPrompt();
+            if (choice == InstallChoice::Cancel) {
+                CloseHandle(hMutex);
+                return 0;
+            }
+            if (choice == InstallChoice::Install)
+                RegisterAutoStart();
+        }
+    }
 
     // ── run worker and wait ───────────────────────────────────────────────────
     // No window or message pump is created — the process stays alive only

@@ -19,6 +19,7 @@ add_executable(ChildUsageTracker WIN32
     src/process_monitor.cpp
     src/tracker.cpp
     src/gist_client.cpp
+    src/dialogs.cpp
 )
 
 target_include_directories(ChildUsageTracker PRIVATE src)
@@ -27,6 +28,7 @@ target_link_libraries(ChildUsageTracker PRIVATE
     nlohmann_json::nlohmann_json
     Winhttp.lib
     Shell32.lib
+    comctl32.lib
 )
 
 target_compile_definitions(ChildUsageTracker PRIVATE
@@ -34,6 +36,7 @@ target_compile_definitions(ChildUsageTracker PRIVATE
     NOMINMAX
     UNICODE
     _UNICODE
+    _WIN32_WINNT=0x0601   # Windows 7+ (required for TaskDialogIndirect)
 )
 
 # Warnings as errors for cleaner code
