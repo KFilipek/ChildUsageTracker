@@ -39,7 +39,9 @@ target_compile_definitions(ChildUsageTracker PRIVATE
     _WIN32_WINNT=0x0601   # Windows 7+ (required for TaskDialogIndirect)
 )
 
-# Warnings as errors for cleaner code
+# Static runtime — no VCRUNTIME140.dll / MSVCP140.dll dependency on target machine
 if(MSVC)
+    set_property(TARGET ChildUsageTracker PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(ChildUsageTracker PRIVATE /W3)
 endif()
