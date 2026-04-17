@@ -84,16 +84,16 @@ static LRESULT CALLBACK PATWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         s->hEdit = mk(WS_EX_CLIENTEDGE, L"EDIT", L"",
                       WS_TABSTOP | ES_AUTOHSCROLL,
-                      14, 60, 390, 26, reinterpret_cast<HMENU>(101));
+                      14, 62, 390, 26, reinterpret_cast<HMENU>(101));
         SendMessageW(s->hEdit, EM_SETLIMITTEXT, 255, 0);
         SetFocus(s->hEdit);
 
         mk(0, L"BUTTON", L"Connect",
            WS_TABSTOP | BS_DEFPUSHBUTTON,
-           230, 100, 90, 28, reinterpret_cast<HMENU>(IDOK));
+           230, 106, 90, 28, reinterpret_cast<HMENU>(IDOK));
         mk(0, L"BUTTON", L"Cancel",
            WS_TABSTOP,
-           328, 100, 76, 28, reinterpret_cast<HMENU>(IDCANCEL));
+           328, 106, 76, 28, reinterpret_cast<HMENU>(IDCANCEL));
         return 0;
     }
     case WM_COMMAND:
@@ -135,7 +135,16 @@ static std::wstring ShowPATInputBox() {
     RegisterClassExW(&wc); // idempotent — ignore if already registered
 
     PATState state = {};
-    const int W  = 420, H = 148;
+
+    // Calculate total window size so client area fits all controls.
+    // Controls: static(y=14,h=38) + edit(y=62,h=26) + buttons(y=106,h=28) + 14 padding = 148px client.
+    RECT rc = { 0, 0, 420, 148 };
+    AdjustWindowRectEx(&rc,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        FALSE,
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST);
+    const int W  = rc.right  - rc.left;
+    const int H  = rc.bottom - rc.top;
     const int sw = GetSystemMetrics(SM_CXSCREEN);
     const int sh = GetSystemMetrics(SM_CYSCREEN);
 
